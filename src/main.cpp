@@ -291,7 +291,6 @@ int main() {
         float gx = raw_gx_int * SCALING_FACTOR;
         float gy = raw_gy_int * SCALING_FACTOR;
         float gz = raw_gz_int * SCALING_FACTOR;
-        printf("%f  %f  %f\n",gx,gy,gz);
         // Subtract the calibrated offsets
         GyroData data = subtract_offset({gx, gy, gz}, data_offset_x, data_offset_y, data_offset_z);
 
@@ -326,7 +325,7 @@ int main() {
                     recordedGesture[gestureDataIndex].y = use_y;
                     recordedGesture[gestureDataIndex].z = use_z;
                     gestureDataIndex++;
-
+                    printf("[%f, %f, %f]\n",gx,gy,gz);
                     char indexBuffer[30];
                     sprintf(indexBuffer, "Recording... %d", gestureDataIndex);
                     lcd.SetTextColor(LCD_COLOR_WHITE);
