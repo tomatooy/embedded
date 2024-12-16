@@ -1,3 +1,8 @@
+//Team member
+//Zongxin Ouyang(zo2065)
+//Yiming Wang(yw8065)
+//Ruixin Wang (rw3495)
+
 #include "mbed.h"
 #include "arm_math.h"
 #include "drivers/LCD_DISCO_F429ZI.h"
