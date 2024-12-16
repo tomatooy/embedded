@@ -325,7 +325,7 @@ int main() {
                     recordedGesture[gestureDataIndex].y = use_y;
                     recordedGesture[gestureDataIndex].z = use_z;
                     gestureDataIndex++;
-                    printf("[%f, %f, %f]\n",gx,gy,gz);
+                    printf("[%f, %f, %f],\n",gx,gy,gz);
                     char indexBuffer[30];
                     sprintf(indexBuffer, "Recording... %d", gestureDataIndex);
                     lcd.SetTextColor(LCD_COLOR_WHITE);
@@ -345,7 +345,7 @@ int main() {
                     currentGesture[currentDataIndex].y = use_y;
                     currentGesture[currentDataIndex].z = use_z;
                     currentDataIndex++;
-
+                    printf("[%f, %f, %f],\n",gx,gy,gz);
                     char indexBuffer1[30];
                     sprintf(indexBuffer1, "Recording... %d", currentDataIndex);
                     lcd.SetTextColor(LCD_COLOR_WHITE);
@@ -358,6 +358,13 @@ int main() {
 
                         float difference = dtw_distance(recordedVec, currentVec);
                         printf("DTW distance: %f\n", difference);
+                        for(int i = 0; i < MAX_GESTURE_SAMPLES; i++){
+                            printf("[%f, %f, %f],\n",recordedGesture[i].x,recordedGesture[i].y,recordedGesture[i].z);
+                        }
+                        printf("===========================================\n");
+                        for(int i = 0; i < MAX_GESTURE_SAMPLES; i++){
+                            printf("[%f, %f, %f],\n",currentGesture[i].x,currentGesture[i].y,currentGesture[i].z);
+                        }
                         if (difference < MATCH_THRESHOLD) {
                             currentState = UNLOCKED;
                         } else {
