@@ -13,7 +13,7 @@
 #define CTRL_REG3_CONFIG 0b0'0'0'0'1'000
 
 #define MAX_GESTURE_SAMPLES 30
-#define MATCH_THRESHOLD 15.0f
+#define MATCH_THRESHOLD 20.0f
 
 enum State {
     ENTRY,
@@ -60,8 +60,10 @@ int currentDataIndex = 0;
 float window_gx[WINDOW_SIZE] = {0}, window_gy[WINDOW_SIZE] = {0}, window_gz[WINDOW_SIZE] = {0};
 int window_index = 0;
 
-// Threshold disabled (no longer needed)
-// float record_threshold = 0.1f;
+// High-pass filter parameters
+static float alpha = 0.95f; // filter coefficient
+static float prev_x_in = 0.0f, prev_y_in = 0.0f, prev_z_in = 0.0f;
+static float prev_x_out = 0.0f, prev_y_out = 0.0f, prev_z_out = 0.0f;
 
 void updateDisplayAndLEDs(State st);
 void buttonPressed();
@@ -272,7 +274,7 @@ int main() {
 
     userButton.rise(&buttonPressed);
 
-    // Calibrate gyro offsets here
+    // Calibrate gyro offsets
     gyro_calibrate(spi, cs);
 
     while (1) {
@@ -291,8 +293,28 @@ int main() {
         float gx = raw_gx_int * SCALING_FACTOR;
         float gy = raw_gy_int * SCALING_FACTOR;
         float gz = raw_gz_int * SCALING_FACTOR;
+
         // Subtract the calibrated offsets
         GyroData data = subtract_offset({gx, gy, gz}, data_offset_x, data_offset_y, data_offset_z);
+
+        // Apply high-pass filter
+        float x_in = data.x;
+        float y_in = data.y;
+        float z_in = data.z;
+
+        float x_out = alpha * (prev_x_out + x_in - prev_x_in);
+        float y_out = alpha * (prev_y_out + y_in - prev_y_in);
+        float z_out = alpha * (prev_z_out + z_in - prev_z_in);
+
+        // Update previous values
+        prev_x_in = x_in; prev_x_out = x_out;
+        prev_y_in = y_in; prev_y_out = y_out;
+        prev_z_in = z_in; prev_z_out = z_out;
+
+        // Replace data with the filtered values
+        data.x = x_out;
+        data.y = y_out;
+        data.z = z_out;
 
         // Apply moving average filtering
         window_gx[window_index] = data.x;
@@ -315,8 +337,6 @@ int main() {
         float use_y = avg_gy;
         float use_z = avg_gz;
 
-        // Removed the threshold check so we always record even if stationary
-
         // Record gestures based on current state
         switch (currentState) {
             case RECORD_GESTURE_SETUP:
@@ -325,7 +345,8 @@ int main() {
                     recordedGesture[gestureDataIndex].y = use_y;
                     recordedGesture[gestureDataIndex].z = use_z;
                     gestureDataIndex++;
-                    printf("[%f, %f, %f],\n",gx,gy,gz);
+                    printf("[%f, %f, %f],\n", gx, gy, gz);
+
                     char indexBuffer[30];
                     sprintf(indexBuffer, "Recording... %d", gestureDataIndex);
                     lcd.SetTextColor(LCD_COLOR_WHITE);
@@ -345,7 +366,8 @@ int main() {
                     currentGesture[currentDataIndex].y = use_y;
                     currentGesture[currentDataIndex].z = use_z;
                     currentDataIndex++;
-                    printf("[%f, %f, %f],\n",gx,gy,gz);
+                    printf("[%f, %f, %f],\n", gx, gy, gz);
+
                     char indexBuffer1[30];
                     sprintf(indexBuffer1, "Recording... %d", currentDataIndex);
                     lcd.SetTextColor(LCD_COLOR_WHITE);
@@ -358,12 +380,11 @@ int main() {
 
                         float difference = dtw_distance(recordedVec, currentVec);
                         printf("DTW distance: %f\n", difference);
-                        for(int i = 0; i < MAX_GESTURE_SAMPLES; i++){
-                            printf("[%f, %f, %f],\n",recordedGesture[i].x,recordedGesture[i].y,recordedGesture[i].z);
+                        for (int i = 0; i < MAX_GESTURE_SAMPLES; i++){
+                            printf("[%f, %f, %f],\n", recordedGesture[i].x, recordedGesture[i].y, recordedGesture[i].z);
                         }
-                        printf("===========================================\n");
-                        for(int i = 0; i < MAX_GESTURE_SAMPLES; i++){
-                            printf("[%f, %f, %f],\n",currentGesture[i].x,currentGesture[i].y,currentGesture[i].z);
+                        for (int i = 0; i < MAX_GESTURE_SAMPLES; i++){
+                            printf("[%f, %f, %f],\n", currentGesture[i].x, currentGesture[i].y, currentGesture[i].z);
                         }
                         if (difference < MATCH_THRESHOLD) {
                             currentState = UNLOCKED;
