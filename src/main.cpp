@@ -1,6 +1,9 @@
 #include "mbed.h"
 #include "arm_math.h"
 #include "drivers/LCD_DISCO_F429ZI.h"
+#include <vector>
+#include <cmath>
+#include <cfloat>
 
 #define CTRL_REG1 0x20
 #define CTRL_REG1_CONFIG 0b01'10'1'1'1'1
@@ -29,7 +32,6 @@ volatile State currentState = ENTRY;
 
 // Scaling factor from raw units to rad/s approximately
 #define SCALING_FACTOR (17.5f * 0.0174532925199432957692236907684886f / 1000.0f)
-
 #define USER_BUTTON PA_0
 
 DigitalOut ledGreen(LED1);
@@ -38,10 +40,14 @@ InterruptIn userButton(USER_BUTTON);
 LCD_DISCO_F429ZI lcd;
 EventFlags flags;
 
-// Gesture data structure
 struct GyroData {
     float x, y, z;
 };
+
+// Global offsets (computed during calibration)
+float data_offset_x = 0.0f;
+float data_offset_y = 0.0f;
+float data_offset_z = 0.0f;
 
 GyroData recordedGesture[MAX_GESTURE_SAMPLES];
 int gestureDataIndex = 0;
@@ -54,34 +60,84 @@ int currentDataIndex = 0;
 float window_gx[WINDOW_SIZE] = {0}, window_gy[WINDOW_SIZE] = {0}, window_gz[WINDOW_SIZE] = {0};
 int window_index = 0;
 
-// DTW distance computation
-inline float pointDistance(const GyroData &a, const GyroData &b) {
-    float dx = a.x - b.x;
-    float dy = a.y - b.y;
-    float dz = a.z - b.z;
-    return sqrtf(dx*dx + dy*dy + dz*dz);
+// Threshold disabled (no longer needed)
+// float record_threshold = 0.1f;
+
+void updateDisplayAndLEDs(State st);
+void buttonPressed();
+void spi_cb(int event);
+void data_cb();
+
+GyroData subtract_offset(const GyroData &raw_data, float offsetX, float offsetY, float offsetZ) {
+    GyroData data;
+    data.x = raw_data.x - offsetX;
+    data.y = raw_data.y - offsetY;
+    data.z = raw_data.z - offsetZ;
+    return data;
 }
 
-float computeGestureDifferenceDTW(GyroData* gesture1, int len1, GyroData* gesture2, int len2) {
-    static float dtw[MAX_GESTURE_SAMPLES+1][MAX_GESTURE_SAMPLES+1];
+// Function to calibrate the gyro offsets
+void gyro_calibrate(SPI &spi, DigitalOut &cs) {
+    int samples = 100;
+    float sumX = 0.0f, sumY = 0.0f, sumZ = 0.0f;
 
-    for (int i = 0; i <= len1; i++) {
-        for (int j = 0; j <= len2; j++) {
-            dtw[i][j] = INFINITY;
+    for (int i = 0; i < samples; i++) {
+        uint8_t write_buf[7] = { OUT_X_L | 0x80 | 0x40 };
+        uint8_t read_buf[7] = {0};
+        cs = 0;
+        for (int j = 0; j < 7; j++) {
+            read_buf[j] = spi.write(write_buf[j]);
         }
+        cs = 1;
+
+        int16_t raw_gx_int = (((uint16_t)read_buf[2]) << 8) | read_buf[1];
+        int16_t raw_gy_int = (((uint16_t)read_buf[4]) << 8) | read_buf[3];
+        int16_t raw_gz_int = (((uint16_t)read_buf[6]) << 8) | read_buf[5];
+
+        float gx = raw_gx_int * SCALING_FACTOR;
+        float gy = raw_gy_int * SCALING_FACTOR;
+        float gz = raw_gz_int * SCALING_FACTOR;
+
+        sumX += gx;
+        sumY += gy;
+        sumZ += gz;
+
+        thread_sleep_for(10);
     }
+
+    data_offset_x = sumX / samples;
+    data_offset_y = sumY / samples;
+    data_offset_z = sumZ / samples;
+}
+
+std::vector<std::vector<float>> convertToVector(const GyroData* gesture, int length) {
+    std::vector<std::vector<float>> vec;
+    vec.reserve(length);
+    for (int i = 0; i < length; i++) {
+        vec.push_back({gesture[i].x, gesture[i].y, gesture[i].z});
+    }
+    return vec;
+}
+
+float dtw_distance(const std::vector<std::vector<float>> &seq1, const std::vector<std::vector<float>> &seq2) {
+    int len1 = (int)seq1.size();
+    int len2 = (int)seq2.size();
+
+    std::vector<std::vector<float>> dtw(len1 + 1, std::vector<float>(len2 + 1, FLT_MAX));
     dtw[0][0] = 0.0f;
 
-    for (int i = 1; i <= len1; i++) {
-        for (int j = 1; j <= len2; j++) {
-            float cost = pointDistance(gesture1[i-1], gesture2[j-1]);
-            float minPrev = dtw[i-1][j];
-            if (dtw[i][j-1] < minPrev) minPrev = dtw[i][j-1];
-            if (dtw[i-1][j-1] < minPrev) minPrev = dtw[i-1][j-1];
+    for (int i = 1; i <= len1; ++i) {
+        for (int j = 1; j <= len2; ++j) {
+            float cost = 0;
+            for (int k = 0; k < 3; ++k) {
+                cost += fabsf(seq1[i - 1][k] - seq2[j - 1][k]);
+            }
+            float minPrev = dtw[i - 1][j];
+            if (dtw[i][j - 1] < minPrev) minPrev = dtw[i][j - 1];
+            if (dtw[i - 1][j - 1] < minPrev) minPrev = dtw[i - 1][j - 1];
             dtw[i][j] = cost + minPrev;
         }
     }
-
     return dtw[len1][len2];
 }
 
@@ -155,7 +211,7 @@ void buttonPressed() {
             break;
 
         case UNLOCKED:
-            // If desired, handle re-lock or do nothing here
+            // Optionally revert to LOCKED or do nothing
             break;
 
         case RECORD_GESTURE_SETUP:
@@ -176,6 +232,7 @@ void data_cb() {
 int main() {
     SPI spi(PF_9, PF_8, PF_7, PC_1, use_gpio_ssel);
     uint8_t write_buf[32], read_buf[32];
+    DigitalOut cs(PC_1, 1);
 
     InterruptIn int2(PA_2, PullDown);
     int2.rise(&data_cb);
@@ -215,29 +272,33 @@ int main() {
 
     userButton.rise(&buttonPressed);
 
-    int16_t raw_gx_int, raw_gy_int, raw_gz_int;
-    float gx, gy, gz;
+    // Calibrate gyro offsets here
+    gyro_calibrate(spi, cs);
 
     while (1) {
         flags.wait_all(DATA_READY_FLAG);
         flags.clear(DATA_READY_FLAG);
 
+        // Read raw gyro data
         write_buf[0] = OUT_X_L | 0x80 | 0x40;
         spi.transfer(write_buf, 7, read_buf, 7, spi_cb);
         flags.wait_all(SPI_FLAG);
 
-        raw_gx_int = (((uint16_t)read_buf[2]) << 8) | read_buf[1];
-        raw_gy_int = (((uint16_t)read_buf[4]) << 8) | read_buf[3];
-        raw_gz_int = (((uint16_t)read_buf[6]) << 8) | read_buf[5];
+        int16_t raw_gx_int = (((uint16_t)read_buf[2]) << 8) | read_buf[1];
+        int16_t raw_gy_int = (((uint16_t)read_buf[4]) << 8) | read_buf[3];
+        int16_t raw_gz_int = (((uint16_t)read_buf[6]) << 8) | read_buf[5];
 
-        gx = raw_gx_int * SCALING_FACTOR;
-        gy = raw_gy_int * SCALING_FACTOR;
-        gz = raw_gz_int * SCALING_FACTOR;
+        float gx = raw_gx_int * SCALING_FACTOR;
+        float gy = raw_gy_int * SCALING_FACTOR;
+        float gz = raw_gz_int * SCALING_FACTOR;
+        printf("%f  %f  %f\n",gx,gy,gz);
+        // Subtract the calibrated offsets
+        GyroData data = subtract_offset({gx, gy, gz}, data_offset_x, data_offset_y, data_offset_z);
 
-        // Moving Average Filter directly
-        window_gx[window_index] = gx;
-        window_gy[window_index] = gy;
-        window_gz[window_index] = gz;
+        // Apply moving average filtering
+        window_gx[window_index] = data.x;
+        window_gy[window_index] = data.y;
+        window_gz[window_index] = data.z;
 
         float avg_gx = 0.0f, avg_gy = 0.0f, avg_gz = 0.0f;
         for (int i = 0; i < WINDOW_SIZE; i++) {
@@ -251,11 +312,13 @@ int main() {
 
         window_index = (window_index + 1) % WINDOW_SIZE;
 
-        // Use the averaged values
         float use_x = avg_gx;
         float use_y = avg_gy;
         float use_z = avg_gz;
 
+        // Removed the threshold check so we always record even if stationary
+
+        // Record gestures based on current state
         switch (currentState) {
             case RECORD_GESTURE_SETUP:
                 if (gestureDataIndex < MAX_GESTURE_SAMPLES) {
@@ -291,7 +354,10 @@ int main() {
                     lcd.DisplayStringAt(0, LINE(7), (uint8_t *)indexBuffer1, CENTER_MODE);
 
                     if (currentDataIndex == gestureDataIndex) {
-                        float difference = computeGestureDifferenceDTW(recordedGesture, gestureDataIndex, currentGesture, currentDataIndex);
+                        std::vector<std::vector<float>> recordedVec = convertToVector(recordedGesture, gestureDataIndex);
+                        std::vector<std::vector<float>> currentVec = convertToVector(currentGesture, currentDataIndex);
+
+                        float difference = dtw_distance(recordedVec, currentVec);
                         printf("DTW distance: %f\n", difference);
                         if (difference < MATCH_THRESHOLD) {
                             currentState = UNLOCKED;
@@ -308,7 +374,7 @@ int main() {
             case ENTRY:
             case UNLOCK_FAILED:
             case UNLOCKED:
-                // No action required
+                // No action required in these states
                 break;
         }
 
